@@ -27,6 +27,27 @@ logger = logging.getLogger(__name__)
 # Flask server
 app = Flask('')
 
+# Start the bot when the Flask app starts
+# This ensures that even if Gunicorn is used, the bot still runs.
+def run_bot_in_thread():
+    # Fix for RuntimeError: Timeout context manager should be used inside a task
+    # We must create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bot.run(discord_token)
+
+# We use a flag to prevent multiple threads starting if gunicorn uses workers
+bot_thread_started = False
+
+@app.before_request
+def start_bot_once():
+    global bot_thread_started
+    if not bot_thread_started:
+        bot_thread_started = True
+        t = Thread(target=run_bot_in_thread)
+        t.daemon = True
+        t.start()
+
 @app.route('/')
 def home():
     return "I'm alive!"
@@ -208,7 +229,7 @@ bot.setup_hook = setup_hook
 
 def create_embed(title, description, color=discord.Color.blue()):
     embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(text="Powered by Aditya Official NGT Team")
+    embed.set_footer(text="Powered by Hideout Team")
     return embed
 
 def get_track_embed(title, track):
@@ -222,7 +243,7 @@ def get_track_embed(title, track):
     embed.add_field(name="Duration", value=duration, inline=True)
     if hasattr(track, 'artwork'):
         embed.set_thumbnail(url=track.artwork)
-    embed.set_footer(text="Powered by Aditya Official NGT Team")
+    embed.set_footer(text="Powered by Hideout Team")
     return embed
 
 @bot.event
@@ -1210,4 +1231,14 @@ async def on_message(message):
 
 if __name__ == "__main__":
     keep_alive()
+    # The bot.run(token) is blocking, but Gunicorn needs to handle the Flask app.
+    # We need to start the bot in a way that doesn't block the main thread if running via Gunicorn.
+    # However, Gunicorn is for the Flask app. 
+    # Usually, for Discord bots on Render, you run the python script directly.
+    # The user is using: gunicorn -w 1 -b 0.0.0.0:5000 main:app
+    # This only starts the Flask 'app', not the 'if __name__ == "__main__"' block.
+    # We should move bot.run into the Flask app initialization or a background thread.
+    
+    # Actually, the best way for Render is to run 'python main.py' and have Flask start in a thread.
+    # If the user insists on Gunicorn, we start the bot when the Flask app is loaded.
     bot.run(discord_token)
