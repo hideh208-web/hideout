@@ -28,15 +28,19 @@ logger = logging.getLogger(__name__)
 app = Flask('')
 
 # Start the bot when the Flask app starts
-# This ensures that even if Gunicorn is used, the bot still runs.
 def run_bot_in_thread():
-    # Fix for RuntimeError: Timeout context manager should be used inside a task
-    # We must create a new event loop for this thread
+    # Set up a new event loop for this thread to avoid loop conflicts
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    bot.run(discord_token)
+    try:
+        # Use run_until_complete with the bot's start coroutine
+        # but we need to make sure the loop is correctly handled.
+        # discord.py's run() actually does this under the hood, 
+        # but the error comes from aiohttp/asyncio interaction.
+        bot.run(discord_token)
+    except Exception as e:
+        logger.error(f"Bot thread error: {e}")
 
-# We use a flag to prevent multiple threads starting if gunicorn uses workers
 bot_thread_started = False
 
 @app.before_request
@@ -282,9 +286,13 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
     if not player.queue.is_empty:
         next_track = player.queue.get() # Changed get_wait() to get() for immediate play
         await player.play(next_track)
-    elif player.queue.loop_all:
-        # Loop all logic could go here if implemented
-        pass
+    else:
+        # 10 second auto-leave
+        await asyncio.sleep(10)
+        if not player.playing and player.queue.is_empty:
+            await player.disconnect()
+            if hasattr(player, 'home_channel'):
+                await player.home_channel.send(embed=create_embed("Disconnected", "Queue ended, leaving voice channel after 10 seconds of inactivity.", discord.Color.blue()))
 
 def load_channel_config():
     try:
@@ -336,7 +344,10 @@ async def play(interaction: discord.Interaction, search: str):
 
         # Deafen the bot when joining
         if not interaction.guild.voice_client:
-            vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
+            try:
+                vc: wavelink.Player = await interaction.user.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
+            except asyncio.TimeoutError:
+                return await interaction.followup.send(embed=create_embed("Connection Timeout", "Unable to connect to the voice channel. Please try again later.", discord.Color.red()))
         else:
             vc: wavelink.Player = interaction.guild.voice_client
 
@@ -1201,7 +1212,14 @@ async def on_message(message):
                 return await message.channel.send(embed=create_embed("Error", "You need to join a voice channel first!", discord.Color.red()))
 
             try:
-                vc: wavelink.Player = message.guild.voice_client or await message.author.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
+                if not message.guild.voice_client:
+                    try:
+                        vc: wavelink.Player = await message.author.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
+                    except asyncio.TimeoutError:
+                        return await message.channel.send(embed=create_embed("Connection Timeout", "Unable to connect to the voice channel. Please try again later.", discord.Color.red()))
+                else:
+                    vc: wavelink.Player = message.guild.voice_client
+                
                 vc.home_channel = message.channel
 
                 tracks = await wavelink.Playable.search(search)
@@ -1230,15 +1248,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 if __name__ == "__main__":
+    # If running locally (not via Gunicorn), keep_alive() starts Flask in a thread
+    # and bot.run() runs in the main thread.
     keep_alive()
-    # The bot.run(token) is blocking, but Gunicorn needs to handle the Flask app.
-    # We need to start the bot in a way that doesn't block the main thread if running via Gunicorn.
-    # However, Gunicorn is for the Flask app. 
-    # Usually, for Discord bots on Render, you run the python script directly.
-    # The user is using: gunicorn -w 1 -b 0.0.0.0:5000 main:app
-    # This only starts the Flask 'app', not the 'if __name__ == "__main__"' block.
-    # We should move bot.run into the Flask app initialization or a background thread.
-    
-    # Actually, the best way for Render is to run 'python main.py' and have Flask start in a thread.
-    # If the user insists on Gunicorn, we start the bot when the Flask app is loaded.
     bot.run(discord_token)
