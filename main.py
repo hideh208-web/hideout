@@ -152,19 +152,17 @@ class MusicControlView(discord.ui.View):
         if not self.player or not self.player.playing:
             return await interaction.followup.send("Nothing is playing.", ephemeral=True)
 
-        if not hasattr(self.player.queue, 'loop_all'):
-            self.player.queue.loop_all = False
-
-        if not self.player.queue.loop and not self.player.queue.loop_all:
-            self.player.queue.loop = True
+        if not self.player.queue.mode == wavelink.QueueMode.normal:
+            self.player.queue.mode = wavelink.QueueMode.normal
+            msg = "Looping: **Off** ❌"
+        elif self.player.queue.mode == wavelink.QueueMode.normal:
+            self.player.queue.mode = wavelink.QueueMode.loop
             msg = "Looping: **Track** 🔂"
-        elif self.player.queue.loop:
-            self.player.queue.loop = False
-            self.player.queue.loop_all = True
+        elif self.player.queue.mode == wavelink.QueueMode.loop:
+            self.player.queue.mode = wavelink.QueueMode.loop_all
             msg = "Looping: **Queue** 🔁"
         else:
-            self.player.queue.loop = False
-            self.player.queue.loop_all = False
+            self.player.queue.mode = wavelink.QueueMode.normal
             msg = "Looping: **Off** ❌"
 
         await interaction.followup.send(msg, ephemeral=True)
@@ -277,17 +275,12 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
             pass
         player.controller_message = None
 
-    # Handle looping logic
-    if player.queue.loop:
-        await player.play(payload.track)
-        return
-
-    # Check for next song in queue
-    if not player.queue.is_empty:
-        next_track = player.queue.get() # Changed get_wait() to get() for immediate play
-        await player.play(next_track)
-    else:
-        # 10 second auto-leave
+    # Wavelink 3.x handles QueueMode automatically. 
+    # If a song ends and queue is not empty, it will play the next one if mode is normal/loop_all.
+    # If mode is loop, it will replay the current one.
+    
+    if player.queue.is_empty and player.queue.mode == wavelink.QueueMode.normal:
+        # 10 second auto-leave only if nothing else is playing/queued
         await asyncio.sleep(10)
         if not player.playing and player.queue.is_empty:
             await player.disconnect()
